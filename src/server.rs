@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use actix::{Actor, Addr, SyncArbiter, SystemRunner};
 use actix_cors::Cors;
-use actix_web::http::Uri;
+use actix_web::http::{Uri, header};
 use actix_web::{
     error, middleware, web, App, Error, HttpRequest, HttpResponse, HttpServer, Result,
 };
@@ -338,7 +338,8 @@ pub fn new(pool: Pool, config: Config) -> SystemRunner {
 
         let cors_middleware = Cors::default()
             .allow_any_origin()
-            .allowed_methods(vec!["GET"]);
+            .allowed_methods(vec!["GET"])
+            .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT]);
 
         App::new()
             .data(state)
