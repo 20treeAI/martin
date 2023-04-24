@@ -7,7 +7,8 @@ use actix_http::ContentEncoding;
 use actix_web::dev::Server;
 use actix_web::error::ErrorBadRequest;
 use actix_web::http::header::{
-    AcceptEncoding, Encoding as HeaderEnc, HeaderValue, Preference, CACHE_CONTROL, CONTENT_ENCODING,
+    AcceptEncoding, Encoding as HeaderEnc, HeaderValue, Preference, ACCEPT, AUTHORIZATION,
+    CACHE_CONTROL, CONTENT_ENCODING,
 };
 use actix_web::http::Uri;
 use actix_web::middleware::TrailingSlash;
@@ -423,7 +424,7 @@ pub fn new_server(config: SrvConfig, sources: Sources) -> crate::Result<(Server,
         let cors_middleware = Cors::default()
             .allow_any_origin()
             .allowed_methods(vec!["GET"])
-            .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT]);
+            .allowed_headers(vec![AUTHORIZATION, ACCEPT]);
 
         App::new()
             .app_data(Data::new(state))
