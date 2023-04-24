@@ -422,7 +422,8 @@ pub fn new_server(config: SrvConfig, sources: Sources) -> crate::Result<(Server,
 
         let cors_middleware = Cors::default()
             .allow_any_origin()
-            .allowed_methods(vec!["GET"]);
+            .allowed_methods(vec!["GET"])
+            .allowed_headers(vec![header::AUTHORIZATION, header::ACCEPT]);
 
         App::new()
             .app_data(Data::new(state))
