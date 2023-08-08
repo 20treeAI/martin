@@ -9,7 +9,7 @@ COPY . .
 RUN CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse cargo build --release --features=vendored-openssl
 
 
-FROM alpine:latest
+FROM alpine:3.18.3
 
 LABEL org.opencontainers.image.description="Blazing fast and lightweight tile server with PostGIS, MBTiles, and PMTiles support"
 
