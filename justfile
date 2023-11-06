@@ -2,19 +2,25 @@
 
 set shell := ["bash", "-c"]
 
+#export DATABASE_URL="postgres://postgres:postgres@localhost:5411/db"
 export PGPORT := "5411"
 export DATABASE_URL := "postgres://postgres:postgres@localhost:" + PGPORT + "/db"
 export CARGO_TERM_COLOR := "always"
 
-# export RUST_LOG := "debug"
-# export RUST_BACKTRACE := "1"
+#export RUST_LOG := "debug"
+#export RUST_LOG := "sqlx::query=info,trace"
+#export RUST_BACKTRACE := "1"
 
 @_default:
-    just --list --unsorted
+    {{just_executable()}} --list --unsorted
 
 # Start Martin server
 run *ARGS:
-    cargo run -- {{ ARGS }}
+    cargo run -p martin -- {{ ARGS }}
+
+# Run mbtiles command
+mbtiles *ARGS:
+    cargo run -p mbtiles -- {{ ARGS }}
 
 # Start release-compiled Martin server and a test database
 run-release *ARGS: start
@@ -23,7 +29,7 @@ run-release *ARGS: start
 # Start Martin server and open a test page
 debug-page *ARGS: start
     open tests/debug.html  # run will not exit, so open debug page first
-    just run {{ ARGS }}
+    {{just_executable()}} run {{ ARGS }}
 
 # Run PSQL utility against the test database
 psql *ARGS:
@@ -43,18 +49,25 @@ clean-test:
     rm -rf tests/output
 
 # Start a test database
-start: (docker-up "db")
+start: (docker-up "db") docker-is-ready
 
 # Start an ssl-enabled test database
-start-ssl: (docker-up "db-ssl")
+start-ssl: (docker-up "db-ssl") docker-is-ready
+
+# Start an ssl-enabled test database that requires a client certificate
+start-ssl-cert: (docker-up "db-ssl-cert") docker-is-ready
 
 # Start a legacy test database
-start-legacy: (docker-up "db-legacy")
+start-legacy: (docker-up "db-legacy") docker-is-ready
 
 # Start a specific test database, e.g. db or db-legacy
 [private]
 docker-up name:
     docker-compose up -d {{ name }}
+
+# Wait for the test database to be ready
+[private]
+docker-is-ready:
     docker-compose run -T --rm db-is-ready
 
 alias _down := stop
@@ -62,8 +75,8 @@ alias _stop-db := stop
 
 # Restart the test database
 restart:
-    just stop
-    just start
+    {{just_executable()}} stop
+    {{just_executable()}} start
 
 # Stop the test database
 stop:
@@ -81,19 +94,40 @@ bench-http: (cargo-install "oha")
     oha -z 120s  http://localhost:3000/function_zxy_query/18/235085/122323
 
 # Run all tests using a test database
-test: (docker-up "db") test-unit test-int
+test: start (test-cargo "--all-targets") test-doc test-int
 
 # Run all tests using an SSL connection to a test database. Expected output won't match.
-test-ssl: (docker-up "ssl") test-unit clean-test
+test-ssl: start-ssl (test-cargo "--all-targets") test-doc clean-test
+    tests/test.sh
+
+# Run all tests using an SSL connection with client cert to a test database. Expected output won't match.
+test-ssl-cert: start-ssl-cert
+    #!/usr/bin/env bash
+    set -euxo pipefail
+    # copy client cert to the tests folder from the docker container
+    KEY_DIR=target/certs
+    mkdir -p $KEY_DIR
+    docker cp martin-db-ssl-cert-1:/etc/ssl/certs/ssl-cert-snakeoil.pem $KEY_DIR/ssl-cert-snakeoil.pem
+    docker cp martin-db-ssl-cert-1:/etc/ssl/private/ssl-cert-snakeoil.key $KEY_DIR/ssl-cert-snakeoil.key
+    #    export DATABASE_URL="$DATABASE_URL?sslmode=verify-full&sslrootcert=$KEY_DIR/ssl-cert-snakeoil.pem&sslcert=$KEY_DIR/ssl-cert-snakeoil.pem&sslkey=$KEY_DIR/ssl-cert-snakeoil.key"
+    export PGSSLROOTCERT="$KEY_DIR/ssl-cert-snakeoil.pem"
+    export PGSSLCERT="$KEY_DIR/ssl-cert-snakeoil.pem"
+    export PGSSLKEY="$KEY_DIR/ssl-cert-snakeoil.key"
+    {{just_executable()}} test-cargo --all-targets
+    {{just_executable()}} clean-test
+    {{just_executable()}} test-doc
     tests/test.sh
 
 # Run all tests using the oldest supported version of the database
-test-legacy: (docker-up "db-legacy") test-unit test-int
+test-legacy: start-legacy (test-cargo "--all-targets") test-doc test-int
 
-# Run Rust unit and doc tests (cargo test)
-test-unit *ARGS:
-    cargo test --all-targets {{ ARGS }}
-    cargo test --doc
+# Run Rust unit tests (cargo test)
+test-cargo *ARGS:
+    cargo test {{ ARGS }}
+
+# Run Rust doc tests
+test-doc *ARGS:
+    cargo test --doc {{ ARGS }}
 
 # Run integration tests
 test-int: clean-test install-sqlx
@@ -109,11 +143,21 @@ test-int: clean-test install-sqlx
     fi
 
 # Run integration tests and save its output as the new expected output
-bless: start clean-test
-    cargo test --features bless-tests
+bless: restart clean-test bless-insta-martin bless-insta-mbtiles
+    rm -rf tests/temp
+    cargo test -p martin --features bless-tests
     tests/test.sh
     rm -rf tests/expected
     mv tests/output tests/expected
+
+# Run integration tests and save its output as the new expected output
+bless-insta-mbtiles *ARGS: (cargo-install "cargo-insta")
+    #rm -rf mbtiles/tests/snapshots
+    cargo insta test --accept --unreferenced=auto -p mbtiles {{ ARGS }}
+
+# Run integration tests and save its output as the new expected output
+bless-insta-martin *ARGS: (cargo-install "cargo-insta")
+    cargo insta test --accept --unreferenced=auto -p martin {{ ARGS }}
 
 # Build and open mdbook documentation
 book: (cargo-install "mdbook")
@@ -136,8 +180,8 @@ coverage FORMAT='html': (cargo-install "grcov")
         rustup component add llvm-tools-preview ;\
     fi
 
-    just clean
-    just start
+    {{just_executable()}} clean
+    {{just_executable()}} start
 
     PROF_DIR=target/prof
     mkdir -p "$PROF_DIR"
@@ -204,19 +248,20 @@ fmt2:
 # Run cargo clippy
 clippy:
     cargo clippy --workspace --all-targets --bins --tests --lib --benches -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 
 # These steps automatically run before git push via a git hook
 [private]
 git-pre-push: stop start
     rustc --version
     cargo --version
-    just lint
-    just test
+    {{just_executable()}} lint
+    {{just_executable()}} test
 
 # Update sqlite database schema.
 prepare-sqlite: install-sqlx
-    mkdir -p martin-mbtiles/.sqlx
-    cd martin-mbtiles && cargo sqlx prepare --database-url sqlite://$PWD/../tests/fixtures/files/world_cities.mbtiles -- --lib --tests
+    mkdir -p mbtiles/.sqlx
+    cd mbtiles && cargo sqlx prepare --database-url sqlite://$PWD/../tests/fixtures/mbtiles/world_cities.mbtiles -- --lib --tests
 
 # Install SQLX cli if not already installed.
 [private]

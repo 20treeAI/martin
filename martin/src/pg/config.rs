@@ -1,14 +1,19 @@
+use std::ops::Add;
+use std::time::Duration;
+
 use futures::future::try_join;
+use log::warn;
 use serde::{Deserialize, Serialize};
 use tilejson::TileJSON;
 
+use crate::args::{BoundsCalcType, DEFAULT_BOUNDS_TIMEOUT};
 use crate::config::{copy_unrecognized_config, UnrecognizedValues};
 use crate::pg::config_function::FuncInfoSources;
 use crate::pg::config_table::TableInfoSources;
 use crate::pg::configurator::PgBuilder;
 use crate::pg::Result;
-use crate::source::Sources;
-use crate::utils::{sorted_opt_map, BoolOrObject, IdResolver, OneOrMany};
+use crate::source::TileInfoSources;
+use crate::utils::{on_slow, sorted_opt_map, IdResolver, OptBoolObj, OptOneMany};
 
 pub trait PgInfo {
     fn format_id(&self) -> String;
@@ -18,18 +23,15 @@ pub trait PgInfo {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PgSslCerts {
     /// Same as PGSSLCERT
-    /// https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLCERT
-    #[cfg(feature = "ssl")]
+    /// ([docs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLCERT))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssl_cert: Option<std::path::PathBuf>,
     /// Same as PGSSLKEY
-    /// https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLKEY
-    #[cfg(feature = "ssl")]
+    /// ([docs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLKEY))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssl_key: Option<std::path::PathBuf>,
     /// Same as PGSSLROOTCERT
-    /// https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLROOTCERT
-    #[cfg(feature = "ssl")]
+    /// ([docs](https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-CONNECT-SSLROOTCERT))
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssl_root_cert: Option<std::path::PathBuf>,
 }
@@ -42,13 +44,13 @@ pub struct PgConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_srid: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub disable_bounds: Option<bool>,
+    pub auto_bounds: Option<BoundsCalcType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_feature_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_size: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub auto_publish: Option<BoolOrObject<PgCfgPublish>>,
+    #[serde(default, skip_serializing_if = "OptBoolObj::is_none")]
+    pub auto_publish: OptBoolObj<PgCfgPublish>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(serialize_with = "sorted_opt_map")]
     pub tables: Option<TableInfoSources>,
@@ -59,35 +61,45 @@ pub struct PgConfig {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PgCfgPublish {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "OptOneMany::is_none")]
     #[serde(alias = "from_schema")]
-    pub from_schemas: Option<OneOrMany<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tables: Option<BoolOrObject<PgCfgPublishType>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub functions: Option<BoolOrObject<PgCfgPublishType>>,
+    pub from_schemas: OptOneMany<String>,
+    #[serde(default, skip_serializing_if = "OptBoolObj::is_none")]
+    pub tables: OptBoolObj<PgCfgPublishTables>,
+    #[serde(default, skip_serializing_if = "OptBoolObj::is_none")]
+    pub functions: OptBoolObj<PgCfgPublishFuncs>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PgCfgPublishType {
-    #[serde(skip_serializing_if = "Option::is_none")]
+pub struct PgCfgPublishTables {
+    #[serde(default, skip_serializing_if = "OptOneMany::is_none")]
     #[serde(alias = "from_schema")]
-    pub from_schemas: Option<OneOrMany<String>>,
+    pub from_schemas: OptOneMany<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(alias = "id_format")]
     pub source_id_format: Option<String>,
     /// A table column to use as the feature ID
     /// If a table has no column with this name, `id_column` will not be set for that table.
     /// If a list of strings is given, the first found column will be treated as a feature ID.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "OptOneMany::is_none")]
     #[serde(alias = "id_column")]
-    pub id_columns: Option<OneOrMany<String>>,
+    pub id_columns: OptOneMany<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub clip_geom: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buffer: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extent: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PgCfgPublishFuncs {
+    #[serde(default, skip_serializing_if = "OptOneMany::is_none")]
+    #[serde(alias = "from_schema")]
+    pub from_schemas: OptOneMany<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "id_format")]
+    pub source_id_format: Option<String>,
 }
 
 impl PgConfig {
@@ -105,16 +117,28 @@ impl PgConfig {
             }
         }
         if self.tables.is_none() && self.functions.is_none() && self.auto_publish.is_none() {
-            self.auto_publish = Some(BoolOrObject::Bool(true));
+            self.auto_publish = OptBoolObj::Bool(true);
         }
 
         Ok(res)
     }
 
-    pub async fn resolve(&mut self, id_resolver: IdResolver) -> crate::Result<Sources> {
+    pub async fn resolve(&mut self, id_resolver: IdResolver) -> crate::Result<TileInfoSources> {
         let pg = PgBuilder::new(self, id_resolver).await?;
+        let inst_tables = on_slow(
+            pg.instantiate_tables(),
+            // warn only if default bounds timeout has already passed
+            DEFAULT_BOUNDS_TIMEOUT.add(Duration::from_secs(1)),
+            || {
+                if pg.auto_bounds() == BoundsCalcType::Skip {
+                    warn!("Discovering tables in PostgreSQL database '{}' is taking too long. Make sure your table geo columns have a GIS index, or use '--auto-bounds skip' CLI/config to skip bbox calculation.", pg.get_id());
+                } else {
+                    warn!("Discovering tables in PostgreSQL database '{}' is taking too long. Bounds calculation is already disabled. You may need to tune your database.", pg.get_id());
+                }
+            },
+        );
         let ((mut tables, tbl_info), (funcs, func_info)) =
-            try_join(pg.instantiate_tables(), pg.instantiate_functions()).await?;
+            try_join(inst_tables, pg.instantiate_functions()).await?;
 
         self.tables = Some(tbl_info);
         self.functions = Some(func_info);
@@ -136,7 +160,7 @@ mod tests {
     use crate::pg::config_function::FunctionInfo;
     use crate::pg::config_table::TableInfo;
     use crate::test_utils::some;
-    use crate::utils::OneOrMany::{Many, One};
+    use crate::utils::OptOneMany::{Many, One};
 
     #[test]
     fn parse_pg_one() {
@@ -146,11 +170,11 @@ mod tests {
               connection_string: 'postgresql://postgres@localhost/db'
         "},
             &Config {
-                postgres: Some(One(PgConfig {
+                postgres: One(PgConfig {
                     connection_string: some("postgresql://postgres@localhost/db"),
-                    auto_publish: Some(BoolOrObject::Bool(true)),
+                    auto_publish: OptBoolObj::Bool(true),
                     ..Default::default()
-                })),
+                }),
                 ..Default::default()
             },
         );
@@ -165,18 +189,18 @@ mod tests {
               - connection_string: 'postgresql://postgres@localhost:5433/db'
         "},
             &Config {
-                postgres: Some(Many(vec![
+                postgres: Many(vec![
                     PgConfig {
                         connection_string: some("postgres://postgres@localhost:5432/db"),
-                        auto_publish: Some(BoolOrObject::Bool(true)),
+                        auto_publish: OptBoolObj::Bool(true),
                         ..Default::default()
                     },
                     PgConfig {
                         connection_string: some("postgresql://postgres@localhost:5433/db"),
-                        auto_publish: Some(BoolOrObject::Bool(true)),
+                        auto_publish: OptBoolObj::Bool(true),
                         ..Default::default()
                     },
-                ])),
+                ]),
                 ..Default::default()
             },
         );
@@ -218,7 +242,7 @@ mod tests {
                   bounds: [-180.0, -90.0, 180.0, 90.0]
         "},
             &Config {
-                postgres: Some(One(PgConfig {
+                postgres: One(PgConfig {
                     connection_string: some("postgres://postgres@localhost:5432/db"),
                     default_srid: Some(4326),
                     pool_size: Some(20),
@@ -255,7 +279,7 @@ mod tests {
                         ),
                     )])),
                     ..Default::default()
-                })),
+                }),
                 ..Default::default()
             },
         );

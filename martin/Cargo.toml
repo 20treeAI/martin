@@ -1,11 +1,11 @@
 [package]
 name = "martin"
-# Make sure to update /home/nyurik/dev/rust/martin/homebrew-formula/martin.rb version
-# Once the release is published with the hash
-version = "0.9.0-pre.1"
+# Once the release is published with the hash, update https://github.com/maplibre/homebrew-martin
+version = "0.10.1"
 authors = ["Stepan Kuzmin <to.stepan.kuzmin@gmail.com>", "Yuri Astrakhan <YuriAstrakhan@gmail.com>", "MapLibre contributors"]
 description = "Blazing fast and lightweight tile server with PostGIS, MBTiles, and PMTiles support"
 keywords = ["maps", "tiles", "mbtiles", "pmtiles", "postgis"]
+categories = ["science::geo", "web-programming::http-server"]
 exclude = [
     # Tests include a lot of data and other test files that are not needed for the users of the library
     "/tests",
@@ -15,7 +15,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-readme.workspace = true
+readme = "README.md"
 homepage.workspace = true
 
 [package.metadata.deb]
@@ -24,7 +24,6 @@ revision = ""
 maintainer = "Yuri Astrakhan <YuriAstrakhan@gmail.com>, Stepan Kuzmin <to.stepan.kuzmin@gmail.com>, MapLibre contributors"
 maintainer-scripts = "../debian"
 depends = "$auto"
-features = ["ssl"]
 assets = [
     ["target/release/martin", "/usr/bin/martin", "755"],
     ["target/release/mbtiles", "/usr/bin/mbtiles", "755"],
@@ -50,8 +49,6 @@ path = "src/bin/main.rs"
 
 [features]
 default = []
-vendored-openssl = ["ssl", "openssl?/vendored"]
-ssl = ["dep:openssl", "dep:postgres-openssl"]
 bless-tests = []
 
 [dependencies]
@@ -59,25 +56,29 @@ actix-cors.workspace = true
 actix-http.workspace = true
 actix-rt.workspace = true
 actix-web.workspace = true
-actix.workspace = true
 async-trait.workspace = true
+bit-set.workspace = true
 brotli.workspace = true
 clap.workspace = true
 deadpool-postgres.workspace = true
 env_logger.workspace = true
-json-patch.workspace = true
 flate2.workspace = true
 futures.workspace = true
 itertools.workspace = true
+json-patch.workspace = true
 log.workspace = true
-martin-mbtiles.workspace = true
 martin-tile-utils.workspace = true
+mbtiles.workspace = true
 num_cpus.workspace = true
+pbf_font_tools.workspace = true
 pmtiles.workspace = true
 postgis.workspace = true
 postgres-protocol.workspace = true
 postgres.workspace = true
 regex.workspace = true
+rustls-native-certs.workspace = true
+rustls-pemfile.workspace = true
+rustls.workspace = true
 semver.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }
@@ -87,16 +88,14 @@ subst.workspace = true
 thiserror.workspace = true
 tilejson.workspace = true
 tokio = { workspace = true, features = ["io-std"] }
-
-# Optional dependencies for ssl support
-openssl = { workspace = true, optional = true }
-postgres-openssl = { workspace = true, optional = true }
+tokio-postgres-rustls.workspace = true
 
 [dev-dependencies]
 cargo-husky.workspace = true
 criterion.workspace = true
 ctor.workspace = true
 indoc.workspace = true
+insta = { workspace = true, features = ["yaml"] }
 #test-log = "0.2"
 
 [[bench]]

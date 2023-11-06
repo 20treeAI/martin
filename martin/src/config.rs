@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::future::Future;
 use std::io::prelude::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 use futures::future::try_join_all;
@@ -10,20 +10,22 @@ use serde::{Deserialize, Serialize};
 use subst::VariableMap;
 
 use crate::file_config::{resolve_files, FileConfigEnum};
+use crate::fonts::FontSources;
 use crate::mbtiles::MbtSource;
 use crate::pg::PgConfig;
 use crate::pmtiles::PmtSource;
-use crate::source::Sources;
-use crate::sprites::{resolve_sprites, SpriteSources};
+use crate::source::{TileInfoSources, TileSources};
+use crate::sprites::SpriteSources;
 use crate::srv::SrvConfig;
-use crate::utils::{IdResolver, OneOrMany, Result};
 use crate::Error::{ConfigLoadError, ConfigParseError, NoSources};
+use crate::{IdResolver, OptOneMany, Result};
 
 pub type UnrecognizedValues = HashMap<String, serde_yaml::Value>;
 
-pub struct AllSources {
-    pub sources: Sources,
+pub struct ServerState {
+    pub tiles: TileSources,
     pub sprites: SpriteSources,
+    pub fonts: FontSources,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -31,17 +33,20 @@ pub struct Config {
     #[serde(flatten)]
     pub srv: SrvConfig,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub postgres: Option<OneOrMany<PgConfig>>,
+    #[serde(default, skip_serializing_if = "OptOneMany::is_none")]
+    pub postgres: OptOneMany<PgConfig>,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pmtiles: Option<FileConfigEnum>,
+    #[serde(default, skip_serializing_if = "FileConfigEnum::is_none")]
+    pub pmtiles: FileConfigEnum,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mbtiles: Option<FileConfigEnum>,
+    #[serde(default, skip_serializing_if = "FileConfigEnum::is_none")]
+    pub mbtiles: FileConfigEnum,
 
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sprites: Option<FileConfigEnum>,
+    #[serde(default, skip_serializing_if = "FileConfigEnum::is_none")]
+    pub sprites: FileConfigEnum,
+
+    #[serde(default, skip_serializing_if = "OptOneMany::is_none")]
+    pub fonts: OptOneMany<PathBuf>,
 
     #[serde(flatten)]
     pub unrecognized: UnrecognizedValues,
@@ -53,77 +58,57 @@ impl Config {
         let mut res = UnrecognizedValues::new();
         copy_unrecognized_config(&mut res, "", &self.unrecognized);
 
-        let mut any = if let Some(pg) = &mut self.postgres {
-            for pg in pg.iter_mut() {
-                res.extend(pg.finalize()?);
-            }
-            !pg.is_empty()
-        } else {
-            false
-        };
+        for pg in self.postgres.iter_mut() {
+            res.extend(pg.finalize()?);
+        }
 
-        any |= if let Some(cfg) = &mut self.pmtiles {
-            res.extend(cfg.finalize("pmtiles.")?);
-            !cfg.is_empty()
-        } else {
-            false
-        };
+        res.extend(self.pmtiles.finalize("pmtiles.")?);
+        res.extend(self.mbtiles.finalize("mbtiles.")?);
+        res.extend(self.sprites.finalize("sprites.")?);
 
-        any |= if let Some(cfg) = &mut self.mbtiles {
-            res.extend(cfg.finalize("mbtiles.")?);
-            !cfg.is_empty()
-        } else {
-            false
-        };
+        // TODO: support for unrecognized fonts?
+        // res.extend(self.fonts.finalize("fonts.")?);
 
-        any |= if let Some(cfg) = &mut self.sprites {
-            res.extend(cfg.finalize("sprites.")?);
-            !cfg.is_empty()
-        } else {
-            false
-        };
-
-        if any {
-            Ok(res)
-        } else {
+        if self.postgres.is_empty()
+            && self.pmtiles.is_empty()
+            && self.mbtiles.is_empty()
+            && self.sprites.is_empty()
+            && self.fonts.is_empty()
+        {
             Err(NoSources)
+        } else {
+            Ok(res)
         }
     }
 
-    pub async fn resolve(&mut self, idr: IdResolver) -> Result<AllSources> {
+    pub async fn resolve(&mut self, idr: IdResolver) -> Result<ServerState> {
+        Ok(ServerState {
+            tiles: self.resolve_tile_sources(idr).await?,
+            sprites: SpriteSources::resolve(&mut self.sprites)?,
+            fonts: FontSources::resolve(&mut self.fonts)?,
+        })
+    }
+
+    async fn resolve_tile_sources(&mut self, idr: IdResolver) -> Result<TileSources> {
         let create_pmt_src = &mut PmtSource::new_box;
         let create_mbt_src = &mut MbtSource::new_box;
+        let mut sources: Vec<Pin<Box<dyn Future<Output = Result<TileInfoSources>>>>> = Vec::new();
 
-        let mut sources: Vec<Pin<Box<dyn Future<Output = Result<Sources>>>>> = Vec::new();
-        if let Some(v) = self.postgres.as_mut() {
-            for s in v.iter_mut() {
-                sources.push(Box::pin(s.resolve(idr.clone())));
-            }
+        for s in self.postgres.iter_mut() {
+            sources.push(Box::pin(s.resolve(idr.clone())));
         }
-        if self.pmtiles.is_some() {
+
+        if !self.pmtiles.is_empty() {
             let val = resolve_files(&mut self.pmtiles, idr.clone(), "pmtiles", create_pmt_src);
             sources.push(Box::pin(val));
         }
 
-        if self.mbtiles.is_some() {
+        if !self.mbtiles.is_empty() {
             let val = resolve_files(&mut self.mbtiles, idr.clone(), "mbtiles", create_mbt_src);
             sources.push(Box::pin(val));
         }
 
-        // Minor in-efficiency:
-        // Sources are added to a BTreeMap, then iterated over into a sort structure and convert back to a BTreeMap.
-        // Ideally there should be a vector of values, which is then sorted (in-place?) and converted to a BTreeMap.
-        Ok(AllSources {
-            sources: try_join_all(sources)
-                .await?
-                .into_iter()
-                .fold(Sources::default(), |mut acc, hashmap| {
-                    acc.extend(hashmap);
-                    acc
-                })
-                .sort(),
-            sprites: resolve_sprites(&mut self.sprites)?,
-        })
+        Ok(TileSources::new(try_join_all(sources).await?))
     }
 }
 

@@ -5,14 +5,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use log::trace;
-use martin_mbtiles::MbtilesPool;
 use martin_tile_utils::TileInfo;
+use mbtiles::MbtilesPool;
 use tilejson::TileJSON;
 
 use crate::file_config::FileError;
 use crate::file_config::FileError::{AquireConnError, InvalidMetadata, IoError};
 use crate::source::{Tile, UrlQuery};
-use crate::utils::is_valid_zoom;
 use crate::{Error, Source, Xyz};
 
 #[derive(Clone)]
@@ -66,8 +65,12 @@ impl MbtSource {
 
 #[async_trait]
 impl Source for MbtSource {
-    fn get_tilejson(&self) -> TileJSON {
-        self.tilejson.clone()
+    fn get_id(&self) -> &str {
+        &self.id
+    }
+
+    fn get_tilejson(&self) -> &TileJSON {
+        &self.tilejson
     }
 
     fn get_tile_info(&self) -> TileInfo {
@@ -76,14 +79,6 @@ impl Source for MbtSource {
 
     fn clone_source(&self) -> Box<dyn Source> {
         Box::new(self.clone())
-    }
-
-    fn is_valid_zoom(&self, zoom: u8) -> bool {
-        is_valid_zoom(zoom, self.tilejson.minzoom, self.tilejson.maxzoom)
-    }
-
-    fn support_url_query(&self) -> bool {
-        false
     }
 
     async fn get_tile(&self, xyz: &Xyz, _url_query: &Option<UrlQuery>) -> Result<Tile, Error> {

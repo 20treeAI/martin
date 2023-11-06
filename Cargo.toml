@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["martin", "martin-tile-utils", "martin-mbtiles"]
+members = ["martin", "martin-tile-utils", "mbtiles"]
 
 [workspace.package]
 edition = "2021"
@@ -11,48 +11,61 @@ readme = "README.md"
 homepage = "https://martin.maplibre.org/"
 
 [workspace.dependencies]
-actix = "0.13"
 actix-cors = "0.6"
 actix-http = "3"
 actix-rt = "2"
 actix-web = "4"
 anyhow = "1.0"
 async-trait = "0.1"
+bit-set = "0.5.3"
 brotli = "3"
 cargo-husky = { version = "1", features = ["user-hooks"], default-features = false }
 clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.5", features = ["async_futures", "async_tokio", "html_reports"] }
 ctor = "0.2"
 deadpool-postgres = "0.11"
+enum-display = "0.1"
 env_logger = "0.10"
 flate2 = "1"
 futures = "0.3"
 indoc = "2"
+insta = "1"
 itertools = "0.11"
-json-patch = "1.1"
+json-patch = "1.2"
 log = "0.4"
-martin-mbtiles = { path = "./martin-mbtiles", version = "0.4.0", default-features = false, features = ["native-tls"] }  # disable CLI tools
 martin-tile-utils = { path = "./martin-tile-utils", version = "0.1.0" }
+mbtiles = { path = "./mbtiles", version = "0.7.0", default-features = false }
 num_cpus = "1"
-openssl = "0.10"
+pbf_font_tools = { version = "2.5.0", features = ["freetype"] }
 pmtiles = { version = "0.3", features = ["mmap-async-tokio", "tilejson"] }
 postgis = "0.9"
 postgres = { version = "0.19", features = ["with-time-0_3", "with-uuid-1", "with-serde_json-1"] }
-postgres-openssl = "0.5"
 postgres-protocol = "0.6"
+pretty_assertions = "1"
 regex = "1"
+rstest = "0.18"
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
+rustls-native-certs = "0.6"
+rustls-pemfile = "1"
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-spreet = { version = "0.8", default-features = false }
-sqlite-hashes = "0.3"
-sqlx = { version = "0.7", features = ["sqlite"] }
+spreet = { version = "0.9", default-features = false }
+sqlite-hashes = { version = "0.5", default-features = false, features = ["md5", "window", "hex"] }
+sqlx = { version = "0.7", features = ["sqlite", "runtime-tokio"] }
 subst = { version = "0.3", features = ["yaml"] }
 thiserror = "1"
 tilejson = "0.3"
-tokio = { version = "1.32.0", features = ["macros"] }
+tokio = { version = "1.33.0", features = ["macros"] }
+tokio-postgres-rustls = "0.10"
 
-[profile.dev.package.sqlx-macros]
+[profile.dev.package]
 # See https://github.com/launchbadge/sqlx#compile-time-verification
-opt-level = 3
+sqlx-macros.opt-level = 3
+# See https://docs.rs/insta/latest/insta/#optional-faster-runs
+insta.opt-level = 3
+similar.opt-level = 3
+
+#[patch.crates-io]
+#sqlite-hashes = { path = "/home/nyurik/dev/rust/sqlite-hashes" }
