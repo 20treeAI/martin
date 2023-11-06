@@ -17,17 +17,20 @@ use actix_web::{
     Result,
 };
 use futures::future::try_join_all;
+use itertools::Itertools as _;
 use log::error;
 use martin_tile_utils::{Encoding, Format, TileInfo};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tilejson::{tilejson, TileJSON};
 
-use crate::config::AllSources;
-use crate::source::{Source, Sources, UrlQuery, Xyz};
-use crate::sprites::{SpriteError, SpriteSources};
+use crate::config::ServerState;
+use crate::fonts::{FontCatalog, FontError, FontSources};
+use crate::source::{Source, TileCatalog, TileSources, UrlQuery};
+use crate::sprites::{SpriteCatalog, SpriteError, SpriteSources};
 use crate::srv::config::{SrvConfig, KEEP_ALIVE_DEFAULT, LISTEN_ADDRESSES_DEFAULT};
 use crate::utils::{decode_brotli, decode_gzip, encode_brotli, encode_gzip};
 use crate::Error::BindingError;
+use crate::{Error, Xyz};
 
 /// List of keywords that cannot be used as source IDs. Some of these are reserved for future use.
 /// Reserved keywords must never end in a "dot number" (e.g. ".1").
@@ -42,6 +45,23 @@ static SUPPORTED_ENCODINGS: &[HeaderEnc] = &[
     HeaderEnc::gzip(),
     HeaderEnc::identity(),
 ];
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Catalog {
+    pub tiles: TileCatalog,
+    pub sprites: SpriteCatalog,
+    pub fonts: FontCatalog,
+}
+
+impl Catalog {
+    pub fn new(state: &ServerState) -> Result<Self, Error> {
+        Ok(Self {
+            tiles: state.tiles.get_catalog(),
+            sprites: state.sprites.get_catalog()?,
+            fonts: state.fonts.get_catalog(),
+        })
+    }
+}
 
 #[derive(Deserialize)]
 struct TileJsonRequest {
@@ -65,6 +85,19 @@ pub fn map_sprite_error(e: SpriteError) -> actix_web::Error {
     use SpriteError::SpriteNotFound;
     match e {
         SpriteNotFound(_) => ErrorNotFound(e.to_string()),
+        _ => map_internal_error(e),
+    }
+}
+
+pub fn map_font_error(e: FontError) -> actix_web::Error {
+    #[allow(clippy::enum_glob_use)]
+    use FontError::*;
+    match e {
+        FontNotFound(_) => ErrorNotFound(e.to_string()),
+        InvalidFontRangeStartEnd(_, _)
+        | InvalidFontRangeStart(_)
+        | InvalidFontRangeEnd(_)
+        | InvalidFontRange(_, _) => ErrorBadRequest(e.to_string()),
         _ => map_internal_error(e),
     }
 }
@@ -95,8 +128,8 @@ async fn get_health() -> impl Responder {
     wrap = "middleware::Compress::default()"
 )]
 #[allow(clippy::unused_async)]
-async fn get_catalog(sources: Data<Sources>) -> impl Responder {
-    HttpResponse::Ok().json(sources.get_catalog())
+async fn get_catalog(catalog: Data<Catalog>) -> impl Responder {
+    HttpResponse::Ok().json(catalog)
 }
 
 #[route("/sprite/{source_ids}.png", method = "GET", method = "HEAD")]
@@ -130,6 +163,28 @@ async fn get_sprite_json(
     Ok(HttpResponse::Ok().json(sheet.get_index()))
 }
 
+#[derive(Deserialize, Debug)]
+struct FontRequest {
+    fontstack: String,
+    start: u32,
+    end: u32,
+}
+
+#[route(
+    "/font/{fontstack}/{start}-{end}",
+    method = "GET",
+    wrap = "middleware::Compress::default()"
+)]
+#[allow(clippy::unused_async)]
+async fn get_font(path: Path<FontRequest>, fonts: Data<FontSources>) -> Result<HttpResponse> {
+    let data = fonts
+        .get_font_range(&path.fontstack, path.start, path.end)
+        .map_err(map_font_error)?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/x-protobuf")
+        .body(data))
+}
+
 #[route(
     "/{source_ids}",
     method = "GET",
@@ -140,20 +195,21 @@ async fn get_sprite_json(
 async fn git_source_info(
     req: HttpRequest,
     path: Path<TileJsonRequest>,
-    sources: Data<Sources>,
+    sources: Data<TileSources>,
 ) -> Result<HttpResponse> {
     let sources = sources.get_sources(&path.source_ids, None)?.0;
-
-    let tiles_path = req
-        .headers()
-        .get("x-rewrite-url")
-        .and_then(parse_x_rewrite_url)
-        .unwrap_or_else(|| req.path().to_owned());
-
     let info = req.connection_info();
+    let tiles_path = get_request_path(&req);
     let tiles_url = get_tiles_url(info.scheme(), info.host(), req.query_string(), &tiles_path)?;
 
     Ok(HttpResponse::Ok().json(merge_tilejson(sources, tiles_url)))
+}
+
+fn get_request_path(req: &HttpRequest) -> String {
+    req.headers()
+        .get("x-rewrite-url")
+        .and_then(parse_x_rewrite_url)
+        .unwrap_or_else(|| req.path().to_owned())
 }
 
 fn get_tiles_url(scheme: &str, host: &str, query_string: &str, tiles_path: &str) -> Result<String> {
@@ -174,7 +230,7 @@ fn get_tiles_url(scheme: &str, host: &str, query_string: &str, tiles_path: &str)
 
 fn merge_tilejson(sources: Vec<&dyn Source>, tiles_url: String) -> TileJSON {
     if sources.len() == 1 {
-        let mut tj = sources[0].get_tilejson();
+        let mut tj = sources[0].get_tilejson().clone();
         tj.tiles = vec![tiles_url];
         return tj;
     }
@@ -189,15 +245,15 @@ fn merge_tilejson(sources: Vec<&dyn Source>, tiles_url: String) -> TileJSON {
     for src in sources {
         let tj = src.get_tilejson();
 
-        if let Some(vector_layers) = tj.vector_layers {
+        if let Some(vector_layers) = &tj.vector_layers {
             if let Some(ref mut a) = result.vector_layers {
-                a.extend(vector_layers);
+                a.extend(vector_layers.iter().cloned());
             } else {
-                result.vector_layers = Some(vector_layers);
+                result.vector_layers = Some(vector_layers.clone());
             }
         }
 
-        if let Some(v) = tj.attribution {
+        if let Some(v) = &tj.attribution {
             if !attributions.contains(&v) {
                 attributions.push(v);
             }
@@ -216,7 +272,7 @@ fn merge_tilejson(sources: Vec<&dyn Source>, tiles_url: String) -> TileJSON {
             result.center = tj.center;
         }
 
-        if let Some(v) = tj.description {
+        if let Some(v) = &tj.description {
             if !descriptions.contains(&v) {
                 descriptions.push(v);
             }
@@ -242,7 +298,7 @@ fn merge_tilejson(sources: Vec<&dyn Source>, tiles_url: String) -> TileJSON {
             }
         }
 
-        if let Some(name) = tj.name {
+        if let Some(name) = &tj.name {
             if !names.contains(&name) {
                 names.push(name);
             }
@@ -250,15 +306,15 @@ fn merge_tilejson(sources: Vec<&dyn Source>, tiles_url: String) -> TileJSON {
     }
 
     if !attributions.is_empty() {
-        result.attribution = Some(attributions.join("\n"));
+        result.attribution = Some(attributions.into_iter().join("\n"));
     }
 
     if !descriptions.is_empty() {
-        result.description = Some(descriptions.join("\n"));
+        result.description = Some(descriptions.into_iter().join("\n"));
     }
 
     if !names.is_empty() {
-        result.name = Some(names.join(","));
+        result.name = Some(names.into_iter().join(","));
     }
 
     result
@@ -268,7 +324,7 @@ fn merge_tilejson(sources: Vec<&dyn Source>, tiles_url: String) -> TileJSON {
 async fn get_tile(
     req: HttpRequest,
     path: Path<TileRequest>,
-    sources: Data<Sources>,
+    sources: Data<TileSources>,
 ) -> Result<HttpResponse> {
     let xyz = Xyz {
         z: path.z,
@@ -306,7 +362,7 @@ async fn get_tile(
         let id = &path.source_ids;
         let zoom = xyz.z;
         let src = sources.get_source(id)?;
-        if !Sources::check_zoom(src, id, zoom) {
+        if !TileSources::check_zoom(src, id, zoom) {
             return Err(ErrorNotFound(format!(
                 "Zoom {zoom} is not valid for source {id}",
             )));
@@ -409,11 +465,13 @@ pub fn router(cfg: &mut web::ServiceConfig) {
         .service(git_source_info)
         .service(get_tile)
         .service(get_sprite_json)
-        .service(get_sprite_png);
+        .service(get_sprite_png)
+        .service(get_font);
 }
 
 /// Create a new initialized Actix `App` instance together with the listening address.
-pub fn new_server(config: SrvConfig, all_sources: AllSources) -> crate::Result<(Server, String)> {
+pub fn new_server(config: SrvConfig, state: ServerState) -> crate::Result<(Server, String)> {
+    let catalog = Catalog::new(&state)?;
     let keep_alive = Duration::from_secs(config.keep_alive.unwrap_or(KEEP_ALIVE_DEFAULT));
     let worker_processes = config.worker_processes.unwrap_or_else(num_cpus::get);
     let listen_addresses = config
@@ -427,8 +485,10 @@ pub fn new_server(config: SrvConfig, all_sources: AllSources) -> crate::Result<(
             .allowed_headers(vec![AUTHORIZATION, ACCEPT]);
 
         App::new()
-            .app_data(Data::new(all_sources.sources.clone()))
-            .app_data(Data::new(all_sources.sprites.clone()))
+            .app_data(Data::new(state.tiles.clone()))
+            .app_data(Data::new(state.sprites.clone()))
+            .app_data(Data::new(state.fonts.clone()))
+            .app_data(Data::new(catalog.clone()))
             .wrap(cors_middleware)
             .wrap(middleware::NormalizePath::new(TrailingSlash::MergeOnly))
             .wrap(middleware::Logger::default())
@@ -470,8 +530,12 @@ mod tests {
 
     #[async_trait]
     impl Source for TestSource {
-        fn get_tilejson(&self) -> TileJSON {
-            self.tj.clone()
+        fn get_id(&self) -> &str {
+            "id"
+        }
+
+        fn get_tilejson(&self) -> &TileJSON {
+            &self.tj
         }
 
         fn get_tile_info(&self) -> TileInfo {
@@ -479,14 +543,6 @@ mod tests {
         }
 
         fn clone_source(&self) -> Box<dyn Source> {
-            unimplemented!()
-        }
-
-        fn is_valid_zoom(&self, _zoom: u8) -> bool {
-            unimplemented!()
-        }
-
-        fn support_url_query(&self) -> bool {
             unimplemented!()
         }
 

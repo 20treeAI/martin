@@ -10,7 +10,7 @@ use crate::args::srv::SrvArgs;
 use crate::args::State::{Ignore, Share, Take};
 use crate::config::Config;
 use crate::file_config::FileConfigEnum;
-use crate::{Error, Result};
+use crate::{Error, OptOneMany, Result};
 
 #[derive(Parser, Debug, PartialEq, Default)]
 #[command(about, version)]
@@ -36,7 +36,7 @@ pub struct MetaArgs {
     /// By default, only print if sources are auto-detected.
     #[arg(long)]
     pub save_config: Option<PathBuf>,
-    /// [Deprecated] Scan for new sources on sources list requests
+    /// **Deprecated** Scan for new sources on sources list requests
     #[arg(short, long, hide = true)]
     pub watch: bool,
     /// Connection strings, e.g. postgres://... or /path/to/files
@@ -44,6 +44,9 @@ pub struct MetaArgs {
     /// Export a directory with SVG files as a sprite source. Can be specified multiple times.
     #[arg(short, long)]
     pub sprite: Vec<PathBuf>,
+    /// Export a font file or a directory with font files as a font source (recursive). Can be specified multiple times.
+    #[arg(short, long)]
+    pub font: Vec<PathBuf>,
 }
 
 impl Args {
@@ -55,18 +58,18 @@ impl Args {
             warn!("The WATCH_MODE env variable is no longer supported, and will be ignored");
         }
         if self.meta.config.is_some() && !self.meta.connection.is_empty() {
-            return Err(Error::ConfigAndConnectionsError);
+            return Err(Error::ConfigAndConnectionsError(self.meta.connection));
         }
 
         self.srv.merge_into_config(&mut config.srv);
 
         let mut cli_strings = Arguments::new(self.meta.connection);
         let pg_args = self.pg.unwrap_or_default();
-        if let Some(pg_config) = &mut config.postgres {
-            // config was loaded from a file, we can only apply a few CLI overrides to it
-            pg_args.override_config(pg_config, env);
-        } else {
+        if config.postgres.is_none() {
             config.postgres = pg_args.into_config(&mut cli_strings, env);
+        } else {
+            // config was loaded from a file, we can only apply a few CLI overrides to it
+            pg_args.override_config(&mut config.postgres, env);
         }
 
         if !cli_strings.is_empty() {
@@ -81,11 +84,15 @@ impl Args {
             config.sprites = FileConfigEnum::new(self.meta.sprite);
         }
 
+        if !self.meta.font.is_empty() {
+            config.fonts = OptOneMany::new(self.meta.font);
+        }
+
         cli_strings.check()
     }
 }
 
-pub fn parse_file_args(cli_strings: &mut Arguments, extension: &str) -> Option<FileConfigEnum> {
+pub fn parse_file_args(cli_strings: &mut Arguments, extension: &str) -> FileConfigEnum {
     let paths = cli_strings.process(|v| match PathBuf::try_from(v) {
         Ok(v) => {
             if v.is_dir() {
@@ -107,7 +114,7 @@ mod tests {
     use super::*;
     use crate::pg::PgConfig;
     use crate::test_utils::{some, FauxEnv};
-    use crate::utils::OneOrMany;
+    use crate::utils::OptOneMany;
 
     fn parse(args: &[&str]) -> Result<(Config, MetaArgs)> {
         let args = Args::parse_from(args);
@@ -143,10 +150,10 @@ mod tests {
 
         let args = parse(&["martin", "postgres://connection"]).unwrap();
         let cfg = Config {
-            postgres: Some(OneOrMany::One(PgConfig {
+            postgres: OptOneMany::One(PgConfig {
                 connection_string: some("postgres://connection"),
                 ..Default::default()
-            })),
+            }),
             ..Default::default()
         };
         let meta = MetaArgs {
@@ -174,7 +181,7 @@ mod tests {
         let env = FauxEnv::default();
         let mut config = Config::default();
         let err = args.merge_into_config(&mut config, &env).unwrap_err();
-        assert!(matches!(err, crate::Error::ConfigAndConnectionsError));
+        assert!(matches!(err, crate::Error::ConfigAndConnectionsError(..)));
     }
 
     #[test]

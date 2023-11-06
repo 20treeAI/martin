@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+#![forbid(unsafe_code)]
 #![warn(clippy::pedantic)]
 // Bounds struct derives PartialEq, but not Eq,
 // so all containing types must also derive PartialEq without Eq
@@ -10,6 +12,7 @@
 pub mod args;
 mod config;
 pub mod file_config;
+pub mod fonts;
 pub mod mbtiles;
 pub mod pg;
 pub mod pmtiles;
@@ -17,6 +20,7 @@ mod source;
 pub mod sprites;
 pub mod srv;
 mod utils;
+pub use utils::Xyz;
 
 #[cfg(test)]
 #[path = "utils/test_utils.rs"]
@@ -26,10 +30,10 @@ mod test_utils;
 // Must make it accessible as carte::Env from both places when testing.
 #[cfg(test)]
 pub use crate::args::Env;
-pub use crate::config::{read_config, Config};
-pub use crate::source::{Source, Sources, Xyz};
+pub use crate::config::{read_config, Config, ServerState};
+pub use crate::source::Source;
 pub use crate::utils::{
-    decode_brotli, decode_gzip, BoolOrObject, Error, IdResolver, OneOrMany, Result,
+    decode_brotli, decode_gzip, Error, IdResolver, OptBoolObj, OptOneMany, Result,
 };
 
 // Ensure README.md contains valid code

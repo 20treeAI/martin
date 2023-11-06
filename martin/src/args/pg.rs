@@ -1,19 +1,37 @@
+use std::time::Duration;
+
+use clap::ValueEnum;
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 
 use crate::args::connections::Arguments;
 use crate::args::connections::State::{Ignore, Take};
 use crate::args::environment::Env;
 use crate::pg::{PgConfig, PgSslCerts, POOL_SIZE_DEFAULT};
-use crate::utils::OneOrMany;
+use crate::utils::{OptBoolObj, OptOneMany};
+
+// Must match the help string for BoundsType::Quick
+pub const DEFAULT_BOUNDS_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(PartialEq, Eq, Default, Debug, Clone, Copy, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum BoundsCalcType {
+    /// Compute table geometry bounds, but abort if it takes longer than 5 seconds.
+    #[default]
+    Quick,
+    /// Compute table geometry bounds. The startup time may be significant. Make sure all GEO columns have indexes.
+    Calc,
+    /// Skip bounds calculation. The bounds will be set to the whole world.
+    Skip,
+}
 
 #[derive(clap::Args, Debug, PartialEq, Default)]
 #[command(about, version)]
 pub struct PgArgs {
-    /// Disable the automatic generation of bounds for spatial PG tables.
+    /// Specify how bounds should be computed for the spatial PG tables. [DEFAULT: quick]
     #[arg(short = 'b', long)]
-    pub disable_bounds: bool,
+    pub auto_bounds: Option<BoundsCalcType>,
     /// Loads trusted root certificates from a file. The file should contain a sequence of PEM-formatted CA certificates.
-    #[cfg(feature = "ssl")]
     #[arg(long)]
     pub ca_root_file: Option<std::path::PathBuf>,
     /// If a spatial PG table has SRID 0, then this default SRID will be used as a fallback.
@@ -31,7 +49,7 @@ impl PgArgs {
         self,
         cli_strings: &mut Arguments,
         env: &impl Env<'a>,
-    ) -> Option<OneOrMany<PgConfig>> {
+    ) -> OptOneMany<PgConfig> {
         let connections = Self::extract_conn_strings(cli_strings, env);
         let default_srid = self.get_default_srid(env);
         let certs = self.get_certs(env);
@@ -42,27 +60,23 @@ impl PgArgs {
                 connection_string: Some(s),
                 ssl_certificates: certs.clone(),
                 default_srid,
-                disable_bounds: if self.disable_bounds {
-                    Some(true)
-                } else {
-                    None
-                },
+                auto_bounds: self.auto_bounds,
                 max_feature_count: self.max_feature_count,
                 pool_size: self.pool_size,
-                auto_publish: None,
+                auto_publish: OptBoolObj::NoValue,
                 tables: None,
                 functions: None,
             })
             .collect();
 
         match results.len() {
-            0 => None,
-            1 => Some(OneOrMany::One(results.into_iter().next().unwrap())),
-            _ => Some(OneOrMany::Many(results)),
+            0 => OptOneMany::NoVals,
+            1 => OptOneMany::One(results.into_iter().next().unwrap()),
+            _ => OptOneMany::Many(results),
         }
     }
 
-    pub fn override_config<'a>(self, pg_config: &mut OneOrMany<PgConfig>, env: &impl Env<'a>) {
+    pub fn override_config<'a>(self, pg_config: &mut OptOneMany<PgConfig>, env: &impl Env<'a>) {
         if self.default_srid.is_some() {
             info!("Overriding configured default SRID to {} on all Postgres connections because of a CLI parameter", self.default_srid.unwrap());
             pg_config.iter_mut().for_each(|c| {
@@ -82,7 +96,6 @@ impl PgArgs {
             });
         }
 
-        #[cfg(feature = "ssl")]
         if self.ca_root_file.is_some() {
             info!("Overriding root certificate file to {} on all Postgres connections because of a CLI parameter",
                 self.ca_root_file.as_ref().unwrap().display());
@@ -145,13 +158,6 @@ impl PgArgs {
             })
     }
 
-    #[cfg(not(feature = "ssl"))]
-    #[allow(clippy::unused_self)]
-    fn get_certs<'a>(&self, _env: &impl Env<'a>) -> PgSslCerts {
-        PgSslCerts {}
-    }
-
-    #[cfg(feature = "ssl")]
     fn get_certs<'a>(&self, env: &impl Env<'a>) -> PgSslCerts {
         let mut result = PgSslCerts {
             ssl_cert: Self::parse_env_var(env, "PGSSLCERT", "ssl certificate"),
@@ -172,7 +178,6 @@ impl PgArgs {
         result
     }
 
-    #[cfg(feature = "ssl")]
     fn parse_env_var<'a>(
         env: &impl Env<'a>,
         env_var: &str,
@@ -194,7 +199,6 @@ fn is_postgresql_string(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(feature = "ssl")]
     use std::path::PathBuf;
 
     use super::*;
@@ -235,10 +239,10 @@ mod tests {
         let config = PgArgs::default().into_config(&mut args, &FauxEnv::default());
         assert_eq!(
             config,
-            Some(OneOrMany::One(PgConfig {
+            OptOneMany::One(PgConfig {
                 connection_string: some("postgres://localhost:5432"),
                 ..Default::default()
-            }))
+            })
         );
         assert!(args.check().is_ok());
     }
@@ -259,16 +263,15 @@ mod tests {
         let config = PgArgs::default().into_config(&mut args, &env);
         assert_eq!(
             config,
-            Some(OneOrMany::One(PgConfig {
+            OptOneMany::One(PgConfig {
                 connection_string: some("postgres://localhost:5432"),
                 default_srid: Some(10),
-                #[cfg(feature = "ssl")]
                 ssl_certificates: PgSslCerts {
                     ssl_root_cert: Some(PathBuf::from("file")),
                     ..Default::default()
                 },
                 ..Default::default()
-            }))
+            })
         );
         assert!(args.check().is_ok());
     }
@@ -294,17 +297,16 @@ mod tests {
         let config = pg_args.into_config(&mut args, &env);
         assert_eq!(
             config,
-            Some(OneOrMany::One(PgConfig {
+            OptOneMany::One(PgConfig {
                 connection_string: some("postgres://localhost:5432"),
                 default_srid: Some(20),
-                #[cfg(feature = "ssl")]
                 ssl_certificates: PgSslCerts {
                     ssl_cert: Some(PathBuf::from("cert")),
                     ssl_key: Some(PathBuf::from("key")),
                     ssl_root_cert: Some(PathBuf::from("root")),
                 },
                 ..Default::default()
-            }))
+            })
         );
         assert!(args.check().is_ok());
     }
